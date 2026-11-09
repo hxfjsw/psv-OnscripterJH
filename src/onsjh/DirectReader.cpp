@@ -266,12 +266,15 @@ void DirectReader::registerCompressionType( const char *ext, int type )
     
 int DirectReader::getRegisteredCompressionType( const char *file_name )
 {
+    if (!*file_name) return NO_COMPRESSION;
     const char *ext_buf = file_name + strlen(file_name);
     while( *ext_buf != '.' && ext_buf != file_name ) ext_buf--;
     ext_buf++;
     
-    strcpy( capital_name, ext_buf );
-    for ( unsigned int i=0 ; i<strlen(ext_buf)+1 ; i++ )
+    size_t ext_len = strlen(ext_buf);
+    if (ext_len > MAX_FILE_NAME_LENGTH * 2) return NO_COMPRESSION;
+    memmove(capital_name, ext_buf, ext_len + 1);
+    for (size_t i = 0; i < ext_len; i++)
         if ( capital_name[i] >= 'a' && capital_name[i] <= 'z' )
             capital_name[i] += 'A' - 'a';
     
@@ -323,9 +326,9 @@ FILE *DirectReader::getFileHandle( const char *file_name, int &compression_type,
         if ( compression_type == NBZ_COMPRESSION || compression_type == SPB_COMPRESSION ){
             *length = getDecompressedFileLength( compression_type, fp, 0 );
         }
-        else{
-            fseek( fp, 0, SEEK_END );
-            *length = ftell( fp );
+        else if (fseek(fp, 0, SEEK_END) == 0){
+            long end = ftell(fp);
+            if (end > 0) *length = end;
         }
     }
             
@@ -345,28 +348,27 @@ size_t DirectReader::getFileLength( const char *file_name )
 
 size_t DirectReader::getFile( const char *file_name, unsigned char *buffer, int *location )
 {
-    int compression_type;
-    size_t len, c, total = 0;
-    FILE *fp = getFileHandle( file_name, compression_type, &len );
-    
-    if ( fp ){
-        if      ( compression_type & NBZ_COMPRESSION ) return decodeNBZ( fp, 0, buffer );
-        else if ( compression_type & SPB_COMPRESSION ) return decodeSPB( fp, 0, buffer );
+    size_t bytes_read;
+    readLooseFile(file_name, buffer, location, bytes_read);
+    return bytes_read;
+}
 
-        fseek( fp, 0, SEEK_SET );
-        total = len;
-        while( len > 0 ){
-            if ( len > READ_LENGTH ) c = READ_LENGTH;
-            else                     c = len;
-            len -= c;
-            fread( buffer, 1, c, fp );
-            buffer += c;
-        }
-        fclose( fp );
+bool DirectReader::readLooseFile(const char *file_name, unsigned char *buffer, int *location, size_t &bytes_read)
+{
+    int compression_type;
+    size_t len;
+    FILE *fp = getFileHandle( file_name, compression_type, &len );
+    bytes_read = 0;
+    if (!fp) return false;
+
+    if (len){
+        if (compression_type & NBZ_COMPRESSION) bytes_read = decodeNBZ(fp, 0, buffer);
+        else if (compression_type & SPB_COMPRESSION) bytes_read = decodeSPB(fp, 0, buffer);
+        else if (fseek(fp, 0, SEEK_SET) == 0) bytes_read = fread(buffer, 1, len, fp);
         if ( location ) *location = ARCHIVE_TYPE_NONE;
     }
-
-    return total;
+    fclose(fp);
+    return len != 0;
 }
 
 void DirectReader::convertCodingToEUC( char *buf )

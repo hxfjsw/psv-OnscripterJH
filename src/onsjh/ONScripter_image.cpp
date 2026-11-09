@@ -194,7 +194,11 @@ SDL_Surface *ONScripter::createSurfaceFromFile(char *filename, bool *has_alpha, 
         buffer = tmp_image_buf;
     }
         
-    script_h.cBR->getFile(filename, buffer, location);
+    if (script_h.cBR->getFile(filename, buffer, location) != length){
+        utils::printError(" *** can't read file [%s] ***\n", filename);
+        if (buffer != tmp_image_buf) delete[] buffer;
+        return NULL;
+    }
     char *ext = strrchr(filename, '.');
 
     SDL_RWops *src = SDL_RWFromMem(buffer, length);
@@ -354,9 +358,18 @@ static void alphaBlendPixelCore32(Uint32 *src1_buffer, Uint32 *src2_buffer, Uint
 }
 #endif
 
+static Uint32 effectMaskAlpha(Uint32 pixel, Uint32 mask_value, Uint32 overflow_mask)
+{
+    Uint32 threshold = pixel & 0xff;
+    if (mask_value <= threshold)
+        return 0;
+    Uint32 alpha = mask_value - threshold;
+    return (alpha & overflow_mask) ? 255 : alpha;
+}
+
 static void alphaBlend32(Uint32 *src1_buffer, Uint32 *src2_buffer, Uint32 *dst_buffer, const Uint32 *mask_buffer,
-    Uint32 mask_value, Uint32 overflow_mask, Uint32 mask_surface_w, int rect_x, int rect_w) {
-    int j2 = rect_x;
+    Uint32 mask_value, Uint32 overflow_mask, int mask_surface_w, int rect_x, int rect_w) {
+    int mask_x = rect_x % mask_surface_w;
 #ifdef USE_SIMD
     using namespace simd;
 #ifdef USE_SIMD_X86_AVX2
@@ -378,53 +391,54 @@ static void alphaBlend32(Uint32 *src1_buffer, Uint32 *src2_buffer, Uint32 *dst_b
         uint8x16::set(0xFF, 0, 0, 0);
 #endif
 #endif
-    Uint32 *mask2 = new Uint32[rect_w];
-    for (int i = 0; i < rect_w; ++i) {
-        Uint32 mask2i = 0;
-        Uint32 mask = *(mask_buffer + j2) & 0xFF;
-        if (mask_value > mask) {
-            mask2i = mask_value - mask;
-            if (mask2i & overflow_mask) mask2i = 0xFF;
-        }
-        uint8x16 vec = uint8x16((Uint8)mask2i);
-        store_u_32(mask2 + i, vec);
-        j2 = j2 >= mask_surface_w ? 0 : j2 + 1;
-    }
-    Uint32* mask2p = mask2;
-#ifdef USE_SIMD_X86_AVX2
-    while (rect_w >= 8) {
-        uint8x32 maskv = load256_a(mask2p);
-        uint16x16 m_lo = widen_lo(maskv, zero);
-        uint16x16 m_hi = widen_hi(maskv, zero);
-        alphaBlend8Core32(src1_buffer, src2_buffer, dst_buffer, m_lo, m_hi, zero, amask);
-        rect_w -= 8; src1_buffer += 8; src2_buffer += 8; dst_buffer += 8; mask2p += 8;
-    }
 #endif
-    while (rect_w >= 4) {
-        uint8x16 maskv = load_a(mask2p);
-        uint16x8 m_lo = widen_lo(maskv, zerol);
-        uint16x8 m_hi = widen_hi(maskv, zerol);
-        alphaBlendCore32(src1_buffer, src2_buffer, dst_buffer, m_lo, m_hi, zerol, amaskl);
-        rect_w -= 4; src1_buffer += 4; src2_buffer += 4; dst_buffer += 4; mask2p +=4;
-    }
+
+    // Process each contiguous run of the tiled mask without allocating a scanline buffer.
     while (rect_w > 0) {
-        alphaBlendPixelCore32(src1_buffer, src2_buffer, dst_buffer, *((Uint8*)mask2p), zerol);
-        --rect_w; ++src1_buffer; ++src2_buffer; ++dst_buffer; ++mask2p;
-    }
-    delete[] mask2;
-#else
-    for (int j = 0; j < rect_w; j++) {
-        Uint32 mask2 = 0;
-        Uint32 mask = *(mask_buffer + j2) & 0xFF;
-        if (mask_value > mask) {
-            mask2 = mask_value - mask;
-            if (mask2 & overflow_mask) mask2 = 0xFF;
+        int count = SDL_min(rect_w, mask_surface_w - mask_x);
+        const Uint32 *mask = mask_buffer + mask_x;
+        rect_w -= count;
+        mask_x = 0;
+#ifdef USE_SIMD
+#ifdef USE_SIMD_X86_AVX2
+        while (count >= 8) {
+            alignas(32) Uint32 alphas[8];
+            for (int i = 0; i < 8; ++i)
+                alphas[i] = effectMaskAlpha(mask[i], mask_value, overflow_mask) * 0x01010101u;
+            uint8x32 maskv = load256_a(alphas);
+            alphaBlend8Core32(src1_buffer, src2_buffer, dst_buffer,
+                             widen_lo(maskv, zero), widen_hi(maskv, zero), zero, amask);
+            count -= 8; src1_buffer += 8; src2_buffer += 8; dst_buffer += 8; mask += 8;
         }
-        BLEND_PIXEL_MASK();
-        src1_buffer++; src2_buffer++; dst_buffer++;
-        j2 = j2 >= mask_surface_w ? 0 : j2 + 1;
-    }
 #endif
+        while (count >= 4) {
+#ifdef USE_SIMD_ARM_NEON
+            uint32x4_t levels = vandq_u32(vld1q_u32(mask), vdupq_n_u32(255));
+            uint32x4_t alphas = vqsubq_u32(vdupq_n_u32(mask_value), levels);
+            uint32x4_t valid = vceqq_u32(vandq_u32(alphas, vdupq_n_u32(overflow_mask)), vdupq_n_u32(0));
+            alphas = vbslq_u32(valid, alphas, vdupq_n_u32(255));
+            uint8x16 maskv = vreinterpretq_u8_u32(vmulq_n_u32(alphas, 0x01010101u));
+#else
+            alignas(16) Uint32 alphas[4];
+            for (int i = 0; i < 4; ++i)
+                alphas[i] = effectMaskAlpha(mask[i], mask_value, overflow_mask) * 0x01010101u;
+            uint8x16 maskv = load_a(alphas);
+#endif
+            alphaBlendCore32(src1_buffer, src2_buffer, dst_buffer,
+                            widen_lo(maskv, zerol), widen_hi(maskv, zerol), zerol, amaskl);
+            count -= 4; src1_buffer += 4; src2_buffer += 4; dst_buffer += 4; mask += 4;
+        }
+#endif
+        while (count > 0) {
+            Uint32 mask2 = effectMaskAlpha(*mask, mask_value, overflow_mask);
+#ifdef USE_SIMD
+            alphaBlendPixelCore32(src1_buffer, src2_buffer, dst_buffer, mask2, zerol);
+#else
+            BLEND_PIXEL_MASK();
+#endif
+            --count; ++src1_buffer; ++src2_buffer; ++dst_buffer; ++mask;
+        }
+    }
 }
 
 inline static void alphaBlendConst32(Uint32 *src1_buffer, Uint32 *src2_buffer, Uint32 *dst_buffer, Uint32 mask2, int remain) {
@@ -525,7 +539,8 @@ void ONScripter::alphaBlend(SDL_Surface *mask_surface,
     mask_value >>= lowest_loss;
 
     if ( (trans_mode == ALPHA_BLEND_FADE_MASK ||
-          trans_mode == ALPHA_BLEND_CROSSFADE_MASK) && mask_surface ){
+          trans_mode == ALPHA_BLEND_CROSSFADE_MASK) && mask_surface &&
+          mask_surface->w > 0 && mask_surface->h > 0 ){
         struct Blender {
             ONSBuf *const stsrc1_buffer, *const stsrc2_buffer, *const stdst_buffer;
             int screen_width;
@@ -537,7 +552,9 @@ void ONScripter::alphaBlend(SDL_Surface *mask_surface,
                 ONSBuf *src1_buffer = stsrc1_buffer + screen_width * i;
                 ONSBuf *src2_buffer = stsrc2_buffer + screen_width * i;
                 ONSBuf *dst_buffer = stdst_buffer + screen_width * i;
-                const ONSBuf *mask_buffer = (ONSBuf *)mask_surface->pixels + mask_surface->w * ((rect->y + i) % mask_surface->h);
+                const auto *mask_pixels = static_cast<const Uint8 *>(mask_surface->pixels);
+                const auto *mask_buffer = reinterpret_cast<const ONSBuf *>(
+                    mask_pixels + mask_surface->pitch * ((rect->y + i) % mask_surface->h));
                 alphaBlend32(src1_buffer, src2_buffer, dst_buffer, mask_buffer, mask_value, overflow_mask, mask_surface->w, rect->x, rect->w);
             }
         } blender = {(ONSBuf *)src1->pixels + src1->w * rect.y + rect.x,

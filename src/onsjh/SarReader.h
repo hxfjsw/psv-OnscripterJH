@@ -51,7 +51,7 @@ protected:
 
     void readArchive( ArchiveInfo *ai, int archive_type = ARCHIVE_TYPE_SAR, unsigned int offset=0 );
     int readArchiveSub( ArchiveInfo *ai, int archive_type = ARCHIVE_TYPE_SAR, bool check_size = true );
-    int getIndexFromFile( ArchiveInfo *ai, const char *file_name );
+    unsigned int getIndexFromFile( ArchiveInfo *ai, const char *file_name );
     size_t getFileSub( ArchiveInfo *ai, const char *file_name, unsigned char *buf );
 
     int writeHeaderSub( ArchiveInfo *ai, FILE *fp, int archive_type = ARCHIVE_TYPE_SAR, int nsa_offset=0 );

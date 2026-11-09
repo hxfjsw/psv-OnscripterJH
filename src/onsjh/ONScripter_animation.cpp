@@ -75,16 +75,23 @@ int ONScripter::calcDurationToNextAnimation()
 
 void ONScripter::proceedAnimation(int current_time)
 {
+    bool changed = false;
     for (int i=0 ; i<3 ; i++)
         if (tachi_info[i].proceedAnimation(current_time))
-            flushDirect(tachi_info[i].pos, refreshMode() | (draw_cursor_flag?REFRESH_CURSOR_MODE:0));
+            changed |= updateScreenTexture(tachi_info[i].pos, refreshMode() | (draw_cursor_flag?REFRESH_CURSOR_MODE:0));
         
     for (int i=MAX_SPRITE_NUM-1 ; i>=0 ; i--)
         if (sprite_info[i].proceedAnimation(current_time))
-            flushDirect(sprite_info[i].pos, refreshMode() | (draw_cursor_flag?REFRESH_CURSOR_MODE:0));
+            changed |= updateScreenTexture(sprite_info[i].pos, refreshMode() | (draw_cursor_flag?REFRESH_CURSOR_MODE:0));
 
 #ifdef USE_LUA
     if (lua_handler.is_animatable && script_h.isExternalScript()){
+        // Lua callbacks can issue their own draws.
+        if (changed && lua_handler.next_time <= current_time &&
+            lua_handler.isCallbackEnabled(LUAHandler::LUA_ANIMATION)){
+            presentScreen();
+            changed = false;
+        }
         while(lua_handler.next_time <= current_time){
             int tmp_event_mode = event_mode;
             int tmp_next_time = next_time;
@@ -122,9 +129,12 @@ void ONScripter::proceedAnimation(int current_time)
                 dst_rect.x += sentence_font.x() * screen_ratio1 / screen_ratio2;
                 dst_rect.y += sentence_font.y() * screen_ratio1 / screen_ratio2;
             }
-            flushDirect( dst_rect, refreshMode() | (draw_cursor_flag?REFRESH_CURSOR_MODE:0) );
+            changed |= updateScreenTexture(dst_rect, refreshMode() | (draw_cursor_flag?REFRESH_CURSOR_MODE:0));
         }
     }
+
+    if (changed)
+        presentScreen();
 }
 
 void ONScripter::setupAnimationInfo( AnimationInfo *anim, FontInfo *info )

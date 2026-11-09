@@ -772,41 +772,50 @@ void ONScripter::flush( int refresh_mode, SDL_Rect *rect, bool clear_dirty_flag,
 
 void ONScripter::flushDirect(SDL_Rect &rect, int refresh_mode)
 {
-    // SDL_Log("## flushDirect refresh_mode=%d, rect(%d,%d,%d,%d)\n", refresh_mode, rect.x, rect.y, rect.w, rect.h );  
-    SDL_Rect dst_rect = {0, 0, 960, 544}; // not use this now
+    if (updateScreenTexture(rect, refresh_mode))
+        presentScreen();
+}
+
+bool ONScripter::updateScreenTexture(const SDL_Rect &rect, int refresh_mode)
+{
+    SDL_Rect clipped;
+    if (!SDL_IntersectRect(&rect, &screen_rect, &clipped))
+        return false;
+
+    refreshSurface(accumulation_surface, &clipped, refresh_mode);
+    SDL_LockSurface(accumulation_surface);
+    const auto *pixels = static_cast<const unsigned char *>(accumulation_surface->pixels);
+    const int pitch = accumulation_surface->pitch;
+    const int result = SDL_UpdateTexture(texture, &clipped,
+                                         pixels + pitch * clipped.y + clipped.x * sizeof(ONSBuf),
+                                         pitch);
+    SDL_UnlockSurface(accumulation_surface);
+    if (result == 0)
+        screen_dirty_flag = true;
+    return result == 0;
+}
+
+void ONScripter::presentScreen()
+{
+    SDL_Rect dst_rect = {0, 0, 960, 544};
 #if defined(PSV)
-	if (!fullscreen_mode)  
-    {
-        int x =screen_device_shiftx;
-        int y =screen_device_shifty;
-		dst_rect = {x, y, screen_device_width, screen_device_height};
-	}
+    if (!fullscreen_mode)
+        dst_rect = {screen_device_shiftx, screen_device_shifty, screen_device_width, screen_device_height};
 #else
     --dst_rect.x; --dst_rect.y; dst_rect.w += 2; dst_rect.h += 2;
     if (AnimationInfo::doClipping(&dst_rect, &screen_rect) || (dst_rect.w == 2 && dst_rect.h == 2)) return;
 #endif
 
-    refreshSurface(accumulation_surface, &rect, refresh_mode);
-    SDL_LockSurface(accumulation_surface);
-    SDL_UpdateTexture(texture, (SDL_Rect*)&rect, 
-        (unsigned char*)accumulation_surface->pixels+accumulation_surface->pitch*rect.y+rect.x*sizeof(ONSBuf), 
-        accumulation_surface->pitch);
-    SDL_UnlockSurface(accumulation_surface);
-
-    screen_dirty_flag = true;
-#if defined(ANDROID) || defined(PSV)      
-        if (compatibilityMode) 
-        {
-            SDL_RenderClear(renderer);
-        }
+#if defined(ANDROID) || defined(PSV)
+    if (compatibilityMode)
+        SDL_RenderClear(renderer);
 #if defined(PSV)
-        // SDL_Log("## ONScripter::flushDirect dst_rect(%d,%d,%d,%d)", dst_rect.x, dst_rect.y, dst_rect.w, dst_rect.h);
-		SDL_RenderCopy(renderer, texture, NULL, &dst_rect);
+    SDL_RenderCopy(renderer, texture, NULL, &dst_rect);
 #else
-        SDL_RenderCopy(renderer, texture, NULL, NULL);
+    SDL_RenderCopy(renderer, texture, NULL, NULL);
 #endif
 #else
-        SDL_RenderCopy(renderer, texture, &dst_rect, &dst_rect);
+    SDL_RenderCopy(renderer, texture, &dst_rect, &dst_rect);
 #endif
     SDL_RenderPresent(renderer);
 }

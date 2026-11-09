@@ -60,6 +60,7 @@ target_link_libraries(${PROJECT_NAME}
   ScePaf_stub_weak 
   SceHid_stub
   freetype
+  bz2
   png
   z
   m

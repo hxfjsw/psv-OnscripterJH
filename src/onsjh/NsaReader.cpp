@@ -189,7 +189,7 @@ size_t NsaReader::getFile( const char *file_name, unsigned char *buffer, int *lo
 
     if ( sar_flag ) return SarReader::getFile( file_name, buffer, location );
 
-    if ( ( ret = DirectReader::getFile( file_name, buffer, location ) ) ) return ret;
+    if (readLooseFile(file_name, buffer, location, ret)) return ret;
 
     for ( int i=0 ; i<num_of_ns2_archives ; i++ ){
         if ( (ret = getFileSub( &archive_info_ns2[i], file_name, buffer )) ){

@@ -242,197 +242,272 @@ static void smpeg_filter_destroy( struct SMPEG_Filter * filter )
 #endif
 
 #if defined(PSV)
-// refered from https://github.com/SonicMastr/Vita-Media-Player/blob/main/src/avplayer/avplayer.c
+#include <atomic>
 #include <malloc.h>
+#include <string>
 #include <vitasdk.h>
-#define FRAMEBUFFER_ALIGNMENT  0x100000 // 0x40000
-#define ALIGN(x, a) (((x) + ((a) - 1)) & ~((a) - 1))
-static void *memalloc(void *p, uint32_t alignment, uint32_t size) 
+
+static void *avcAlloc(void *, uint32_t alignment, uint32_t size)
 {
-	return memalign(alignment, size);
+    return memalign(alignment, size);
 }
 
-static void dealloc(void *p, void *ptr) 
+static void avcFree(void *, void *ptr)
 {
-	free(ptr);
+    free(ptr);
 }
 
-static void *gpu_alloc(void *p, uint32_t alignment, uint32_t size) 
+static void *avcAllocFrame(void *, uint32_t alignment, uint32_t size)
 {
-	void *base = NULL;
-	if (alignment < FRAMEBUFFER_ALIGNMENT) 
-    {
-		alignment = FRAMEBUFFER_ALIGNMENT;
-	}
-	size = ALIGN(size, alignment);
-#ifdef SYS_APP_MODE
-	size = ALIGN(size, 1024 * 1024);
-	SceUID memblock = sceKernelAllocMemBlock("Video Memblock", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, size, NULL);
-#else
-	SceKernelAllocMemBlockOpt opt;
-	memset(&opt, 0, sizeof(opt));
-	opt.size = sizeof(SceKernelAllocMemBlockOpt);
-	opt.attr = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT;
-	opt.alignment = alignment;
-	SceUID memblock = sceKernelAllocMemBlock("avcblodk", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, size, NULL);
-#endif
-	sceKernelGetMemBlockBase(memblock, &base);
-	int res = sceGxmMapMemory(base, size, SCE_GXM_MEMORY_ATTRIB_RW);
-    // printf("## alloc_gpu %p memblock=%x, sceGxmMapMemory res=%x, base=%x, align=0x%x, size=0x%x\n", p, memblock, res, base, alignment, size);
-	return base;
+    // Physically contiguous allocations use 1 MiB pages.
+    const uint32_t page_size = 0x100000;
+    size = (size + page_size - 1) & ~(page_size - 1);
+    SceKernelAllocMemBlockOpt options = {};
+    options.size = sizeof(options);
+    options.attr = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT;
+    options.alignment = alignment;
+    SceUID block = sceKernelAllocMemBlock("AVC frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW,
+                                          size, alignment > page_size ? &options : NULL);
+    if (block < 0) {
+        SDL_Log("AVC frame allocation failed (%u bytes): 0x%08x", size, block);
+        return NULL;
+    }
+
+    void *base = NULL;
+    if (sceKernelGetMemBlockBase(block, &base) < 0 ||
+        sceGxmMapMemory(base, size, SCE_GXM_MEMORY_ATTRIB_RW) < 0) {
+        sceKernelFreeMemBlock(block);
+        return NULL;
+    }
+    return base;
 }
 
-static void gpu_dealloc(void *p, void *ptr) 
+static void avcFreeFrame(void *, void *ptr)
 {
-	SceUID memblock = sceKernelFindMemBlockByAddr(ptr, 0);
-	sceKernelFreeMemBlock(memblock);
+    if (!ptr) return;
+    SceUID block = sceKernelFindMemBlockByAddr(ptr, 0);
+    if (block >= 0) {
+        sceGxmUnmapMemory(ptr);
+        sceKernelFreeMemBlock(block);
+    }
 }
 
-SceAvPlayerHandle g_avplayer = -1;
-static int aacaudio_thread(unsigned int args, void* arg)
-{
-    static volatile int audio_vol = 32767;
-	int ch = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, 1024, 48000, SCE_AUDIO_OUT_MODE_STEREO);
-    printf("## sceAudioOutOpenPort %d\n", ch);
-	sceAudioOutSetConfig(ch, -1, -1, (SceAudioOutMode)-1);
-	
-	SceAvPlayerFrameInfo audio_frame;
-	memset(&audio_frame, 0, sizeof(SceAvPlayerFrameInfo));
-	
-	// Setting audio channel volume
-	int vol_stereo[] = {audio_vol, audio_vol};
-	sceAudioOutSetVolume(ch, (SceAudioOutChannelFlag)(SCE_AUDIO_VOLUME_FLAG_L_CH | SCE_AUDIO_VOLUME_FLAG_R_CH), vol_stereo);
-	
-	while (g_avplayer) 
-    {
-		if (sceAvPlayerIsActive(g_avplayer)) 
-        {
-			if (sceAvPlayerGetAudioData(g_avplayer, &audio_frame))
-            {
-				sceAudioOutSetConfig(ch, -1, audio_frame.details.audio.sampleRate, 
-                    audio_frame.details.audio.channelCount == 1 ? 
-                        SCE_AUDIO_OUT_MODE_MONO : SCE_AUDIO_OUT_MODE_STEREO);
-				sceAudioOutOutput(ch, audio_frame.pData);
-			} 
-            else 
-            {
-				sceKernelDelayThread(1000);
-			}
-		} 
-        else 
-        {
-			sceKernelDelayThread(1000);
-		}
-	}
-	
-	return sceKernelExitDeleteThread(0);
-}
+struct AvcAudio {
+    SceAvPlayerHandle player;
+    std::atomic<bool> stop{false};
+};
 
+static int SDLCALL avcAudioThread(void *data)
+{
+    AvcAudio &audio = *static_cast<AvcAudio *>(data);
+    const int output_rate = 48000;
+    const int output_frames = 1024;
+    alignas(64) int16_t pcm[2][output_frames * 2];
+    int buffer = 0;
+    int port = -1;
+    SDL_AudioStream *stream = NULL;
+    int sample_rate = 0;
+    int channels = 0;
+    SceAvPlayerFrameInfo frame = {};
+
+    while (!audio.stop.load()) {
+        if (!sceAvPlayerGetAudioData(audio.player, &frame)) {
+            sceKernelDelayThread(1000);
+            continue;
+        }
+
+        const SceAvPlayerAudio &format = frame.details.audio;
+        if (!frame.pData || format.channelCount < 1 || format.channelCount > 2 ||
+            !format.sampleRate || !format.size) continue;
+
+        if (port < 0) {
+            port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, output_frames,
+                                       output_rate, SCE_AUDIO_OUT_MODE_STEREO);
+            if (port < 0) {
+                SDL_Log("AVC audio port failed: 0x%08x", port);
+                break;
+            }
+            int volume[] = {32767, 32767};
+            sceAudioOutSetVolume(port, (SceAudioOutChannelFlag)(SCE_AUDIO_VOLUME_FLAG_L_CH |
+                                                              SCE_AUDIO_VOLUME_FLAG_R_CH), volume);
+        }
+
+        // MAIN requires 48 kHz. Resampling leaves the game's BGM port available.
+        if (sample_rate != (int)format.sampleRate || channels != format.channelCount) {
+            if (stream) SDL_FreeAudioStream(stream);
+            sample_rate = format.sampleRate;
+            channels = format.channelCount;
+            stream = SDL_NewAudioStream(AUDIO_S16SYS, channels, sample_rate,
+                                        AUDIO_S16SYS, 2, output_rate);
+            if (!stream) {
+                SDL_Log("AVC audio conversion failed: %s", SDL_GetError());
+                break;
+            }
+        }
+        if (SDL_AudioStreamPut(stream, frame.pData, format.size) < 0) {
+            SDL_Log("AVC audio queue failed: %s", SDL_GetError());
+            break;
+        }
+        while (!audio.stop.load() && SDL_AudioStreamAvailable(stream) >= (int)sizeof(pcm[0])) {
+            if (SDL_AudioStreamGet(stream, pcm[buffer], sizeof(pcm[0])) != sizeof(pcm[0])) break;
+            if (sceAudioOutOutput(port, pcm[buffer]) < 0) {
+                SDL_Log("AVC audio output failed");
+                audio.stop.store(true);
+                break;
+            }
+            buffer ^= 1;
+        }
+    }
+
+    if (port >= 0) {
+        sceAudioOutOutput(port, NULL);
+        sceAudioOutReleasePort(port);
+    }
+    if (stream) SDL_FreeAudioStream(stream);
+    return 0;
+}
 #endif
 
 int ONScripter::playAVC(const char *filename, bool click_flag, bool loop_flag)
 {
-    int ret = 0, _res = 0;
-    SDL_Log("## ONScripter::playAVC %s, click_flag=%d, loop_flag=%d\n", filename, click_flag, loop_flag);
 #if defined(PSV)
-    // checkout the video path
-    SceUID fd = -1;
-    static char path[256];
-    static char basename[256];
-    strcpy(basename, filename);
-    char *cur = strrchr(basename, '.');
-    if(cur) *cur='\0';
+    std::string name(filename);
+    const size_t dot = name.find_last_of('.');
+    const size_t slash = name.find_last_of("/\\");
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        name.resize(dot);
 
-    snprintf(path, sizeof(path), "%s%s.mp4", archive_path, basename);
-    fd = sceIoOpen(path, SCE_O_RDONLY, 0777);
-    if(fd <= 0)
-    {
-        snprintf(path, sizeof(path), "%s%s", archive_path, filename);
-        fd = sceIoOpen(path, SCE_O_RDONLY, 0777);
-    }
-    if(fd>=0) sceIoClose(fd);
-
-    // initialize the video player
-    SDL_Texture *texture = NULL;
-    SDL_Rect dst_rect = {
-        (960 - screen_device_width)/2, 
-        (544 - screen_device_height)/2, 
-        screen_device_width, screen_device_height};
-    SceAvPlayerInitData avplayer_init;
-    SceAvPlayerFrameInfo frameinfo;
-    SceUID audio_thread;
-    
-    memset(&avplayer_init, 0, sizeof(SceAvPlayerInitData));
-    avplayer_init.memoryReplacement.allocate = memalloc;
-    avplayer_init.memoryReplacement.deallocate = dealloc;
-    avplayer_init.memoryReplacement.allocateTexture = gpu_alloc;
-    avplayer_init.memoryReplacement.deallocateTexture = gpu_dealloc;
-    avplayer_init.basePriority = 0xA0;
-	avplayer_init.numOutputVideoFrameBuffers = 2;
-    // avplayer_init.debugLevel = 3; //  for debug player
-	avplayer_init.autoStart = true;
-    _res = sceSysmoduleLoadModule(SCE_SYSMODULE_AVPLAYER);
-    SDL_Log("## sceSysmoduleLoadModule res=0x%08x\n", _res);
-    if(_res < 0) goto playAVC_end;
-    g_avplayer = sceAvPlayerInit(&avplayer_init);
-    SDL_Log("## sceAvPlayerInit handle=%p\n", g_avplayer);
-    _res = sceAvPlayerAddSource(g_avplayer, path);
-    SDL_Log("## sceAvPlayerAddSource [%s] res=0x%08x\n", path, _res);
-    if(_res < 0) goto playAVC_end;
-    
-    // decode the video
-    sceAvPlayerSetLooping(g_avplayer, loop_flag);
-	sceAvPlayerSetTrickSpeed(g_avplayer, 100);
-    sceKernelDelayThread(1000); // must have audio thread
-    audio_thread = sceKernelCreateThread("Vid Audio Thread", 
-        &aacaudio_thread, 0x10000100, 0x10000, 0, 0, NULL);
-    sceKernelStartThread(audio_thread, 0, NULL);
-    while(sceAvPlayerIsActive(g_avplayer))
-    {
-        if(sceAvPlayerGetVideoData(g_avplayer, &frameinfo))
-        {
-            int w = frameinfo.details.video.width;
-            int h = frameinfo.details.video.height;
-            uint64_t time = frameinfo.timeStamp;
-            uint8_t *framebuf = frameinfo.pData;
-
-            // SDL_Log("## sceAvPlayerGetVideoData buf=%p, time=%llu, %dX%d\n", framebuf, time, w, h);
-            if(!texture)
-            {
-                texture = SDL_CreateTexture(renderer, 
-                    SDL_PIXELFORMAT_YV12, SDL_TEXTUREACCESS_STREAMING, w, h);
-            }
-            void *pixels = NULL;
-            int pitch = 0;
-            SDL_LockTexture(texture, NULL, &pixels, &pitch);
-            memcpy(pixels, framebuf, w*h + w*h/4 + w*h/4); // for yuv420p, in seperate plane
-            SDL_UnlockTexture(texture);
-            SDL_RenderClear(renderer);
-            SDL_RenderCopy(renderer, texture, NULL, &dst_rect);
-            SDL_RenderPresent(renderer);
+    std::string path = std::string(archive_path) + name + ".mp4";
+    SceUID fd = sceIoOpen(path.c_str(), SCE_O_RDONLY, 0);
+    if (fd < 0) {
+        path = std::string(archive_path) + filename;
+        fd = sceIoOpen(path.c_str(), SCE_O_RDONLY, 0);
+        if (fd < 0) {
+            SDL_Log("AVC source not found: %s", path.c_str());
+            return 0;
         }
-        if(click_flag)
-        {
-            SDL_Event event;
-            while(SDL_PollEvent(&event))
-            {
-                if(event.type == SDL_JOYBUTTONDOWN)
-                {
-                     // press cross or start to skip video
-                    Uint8 button = event.jbutton.button;
-                    if(button == 2 || button == 11)
-                        goto playAVC_end;
+    }
+    sceIoClose(fd);
+
+    const bool load_module = sceSysmoduleIsLoaded(SCE_SYSMODULE_AVPLAYER) != 0;
+    if (load_module) {
+        int result = sceSysmoduleLoadModule(SCE_SYSMODULE_AVPLAYER);
+        if (result < 0) {
+            SDL_Log("AVC module load failed: 0x%08x", result);
+            return 0;
+        }
+    }
+
+    SceAvPlayerInitData init = {};
+    init.memoryReplacement.allocate = avcAlloc;
+    init.memoryReplacement.deallocate = avcFree;
+    init.memoryReplacement.allocateTexture = avcAllocFrame;
+    init.memoryReplacement.deallocateTexture = avcFreeFrame;
+    init.basePriority = 0xA0;
+    init.numOutputVideoFrameBuffers = 3;
+    init.autoStart = true;
+
+    SceAvPlayerHandle player = sceAvPlayerInit(&init);
+    // Valid handles can have the sign bit set. AvPlayer errors use 0x806Axxxx.
+    if (!player || player == -1 || (static_cast<uint32_t>(player) >> 16) == 0x806A) {
+        SDL_Log("AVC initialization failed: 0x%08x", player);
+    } else {
+        int result = sceAvPlayerAddSource(player, path.c_str());
+        if (result < 0) {
+            SDL_Log("AVC source rejected (%s): 0x%08x", path.c_str(), result);
+        } else {
+            sceAvPlayerSetLooping(player, loop_flag);
+            AvcAudio audio;
+            audio.player = player;
+            SDL_Thread *audio_thread = SDL_CreateThread(avcAudioThread, "AVC audio", &audio);
+            if (!audio_thread) SDL_Log("AVC audio thread failed: %s", SDL_GetError());
+
+            SDL_Texture *movie = NULL;
+            const SDL_Rect destination = {
+                (device_width - screen_device_width) / 2,
+                (device_height - screen_device_height) / 2,
+                screen_device_width, screen_device_height
+            };
+            int width = 0;
+            int height = 0;
+            bool skipped = false;
+            bool presented = false;
+            Uint32 last_frame = SDL_GetTicks();
+            SceAvPlayerFrameInfo frame = {};
+            const SDL_YUV_CONVERSION_MODE previous_mode = SDL_GetYUVConversionMode();
+            SDL_SetYUVConversionMode(SDL_YUV_CONVERSION_AUTOMATIC);
+
+            while (!skipped) {
+                if (click_flag) {
+                    SDL_Event event;
+                    while (SDL_PollEvent(&event)) {
+                        if (event.type == SDL_JOYBUTTONDOWN &&
+                            (event.jbutton.button == 2 || event.jbutton.button == 11)) {
+                            skipped = true;
+                            break;
+                        }
+                    }
+                    if (skipped) break;
                 }
+
+                if (!sceAvPlayerGetVideoData(player, &frame)) {
+                    const Uint32 idle = SDL_GetTicks() - last_frame;
+                    // AvPlayer can report inactive while opening or buffering.
+                    if (presented && !loop_flag && idle >= 250 && !sceAvPlayerIsActive(player)) break;
+                    if (idle >= 5000) {
+                        SDL_Log("AVC timed out waiting for a frame: %s", path.c_str());
+                        break;
+                    }
+                    sceKernelDelayThread(1000);
+                    continue;
+                }
+
+                const int frame_width = frame.details.video.width;
+                const int frame_height = frame.details.video.height;
+                if (!frame.pData || frame_width <= 0 || frame_height <= 0 ||
+                    frame_width > 1920 || frame_height > 1088 || ((frame_width | frame_height) & 1)) {
+                    SDL_Log("AVC returned an invalid NV12 frame: %dx%d", frame_width, frame_height);
+                    break;
+                }
+                if (width != frame_width || height != frame_height) {
+                    SDL_DestroyTexture(movie);
+                    movie = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_NV12,
+                                              SDL_TEXTUREACCESS_STREAMING, frame_width, frame_height);
+                    if (!movie) {
+                        SDL_Log("AVC texture creation failed: %s", SDL_GetError());
+                        break;
+                    }
+                    width = frame_width;
+                    height = frame_height;
+                }
+
+                // SceAvPlayer stores NV12 rows on 16-byte boundaries.
+                // SDL's Vita GXM renderer uploads them using its own destination pitch.
+                const int pitch = (width + 15) & ~15;
+                const uint8_t *uv = frame.pData + static_cast<size_t>(pitch) * height;
+                if (SDL_UpdateNVTexture(movie, NULL, frame.pData, pitch, uv, pitch) < 0 ||
+                    SDL_RenderClear(renderer) < 0 ||
+                    SDL_RenderCopy(renderer, movie, NULL, &destination) < 0) {
+                    SDL_Log("AVC frame rendering failed: %s", SDL_GetError());
+                    break;
+                }
+                SDL_RenderPresent(renderer);
+                presented = true;
+                last_frame = SDL_GetTicks();
             }
+
+            audio.stop.store(true);
+            if (audio_thread) SDL_WaitThread(audio_thread, NULL);
+            SDL_DestroyTexture(movie);
+            SDL_SetYUVConversionMode(previous_mode);
+            if (!presented && !skipped) SDL_Log("AVC produced no video frames: %s", path.c_str());
         }
+        sceAvPlayerStop(player);
+        sceAvPlayerClose(player);
     }
-    ret = 0;
-playAVC_end:
-    if(g_avplayer>0)  sceAvPlayerClose(g_avplayer);
-    if(g_avplayer) g_avplayer = 0;
-    if(texture) SDL_DestroyTexture(texture);
+    if (load_module) sceSysmoduleUnloadModule(SCE_SYSMODULE_AVPLAYER);
 #endif
-    return ret;
+    return 0;
 }
 
 int ONScripter::playMPEG(const char *filename, bool click_flag, bool loop_flag)

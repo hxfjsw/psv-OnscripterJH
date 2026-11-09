@@ -1,6 +1,7 @@
 #include <psp2/io/dirent.h>
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
+#include <string.h>
 #include <strings.h>
 #include <stdlib.h>
 #include <stdio.h>

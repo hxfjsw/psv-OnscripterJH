@@ -30,13 +30,13 @@ I tested it with windows msys `sh` and linux `bash`.
 
 ```sh
 #install vitasdk
-sh ./script/install_vitasdk.sh [vitasdkdir]
+bash ./script/install_vitasdk.sh [vitasdkdir]
 
-# build script
+# build a Release package at build/VitaOns.vpk
 sh ./script/build_vitavpk.sh vpk [vitasdkdir]
 
 # send script
-sh send_vitavpk.sh ./../build/vita_onscripter.vpk 10.2.12.6 PSVONSEMU
+sh send_vitavpk.sh ./../build/VitaOns.vpk 10.2.12.6 PSVONSEMU
 sh build_vitavpk.sh all && sh send_vitaeboot.sh 10.2.12.6
 ```
 
@@ -46,21 +46,23 @@ Put ons games into `ux0:onsemu/` and enjoy 🍀
 The game directory should not contain non-asci charactors.  
 See original informations in details.  
 
-❗The hardware decoder in psv can only decode `avc yuv420p, aac, mp4` format video.  
-If other videos, you need to convert them in advance.  
-(If decode fails, you can also remove the video to continue the game)  
-This engine will at first search the same video name with `.mp4` extension to decode.  
+The Vita movie path uses the system AV player for H.264/AVC in MP4 with 8-bit 4:2:0 video
+and mono or stereo AAC. For clips outside the supported decoder formats, start with
+720p or smaller at 30 fps. The engine searches for a loose `.mp4` with the same base name
+as the movie in the game script.
 
-``` shell
-ffmpeg -i op.mpg -c:v libx264 -c:a aac -pix_fmt yuv420p op.mp4
+```sh
+ffmpeg -i op.mpg -map 0:v:0 -map '0:a:0?' \
+  -vf "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1" \
+  -fpsmax 30 -c:v libx264 -profile:v main -level:v 3.1 -pix_fmt yuv420p -refs 3 \
+  -crf 20 -maxrate 5M -bufsize 10M -c:a aac -ac 2 -ar 48000 -movflags +faststart op.mp4
 ```
 
 ![vitaons_mo2](screenshot/vitaons_mo2.png)
 
 ## 3. konwn issues (including already solved)
 
-- [x] cmake 3.24.2 generate wrong target (like `onsjh.self-self`), use 3.16.x instead.  
-  Solved by [branch cmake](https://github.com/vitasdk/vita-toolchain/issues/215)  
+- [x] CMake builds handle the VitaSDK target naming change for `onsjh.self-self`.
 - [x] Some game `*** can't load file [fgimage/CGTM16.png] Out of memory ***`  
   This is because vita homebrew heap size has restriction to 32M.  
   Solved by override [strbrk](https://gitee.com/yizhigai/onscripter-vita/blob/master/onscripter/vita/sbrk.c)  

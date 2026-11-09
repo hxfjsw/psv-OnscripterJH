@@ -553,6 +553,17 @@ void AnimationInfo::blendOnSurface( SDL_Surface *dst_surface, int dst_x, int dst
                         --remain; ++src_buffer; ++dst_buffer; alphap += 4;
                     }
                     else if ((*alphap == 255) && (alpha == 255)) {
+#ifdef USE_SIMD_ARM_NEON
+                        if (remain >= 4) {
+                            uint32x4_t pixels = vld1q_u32(src_buffer);
+                            uint32x2_t alpha_bits = vand_u32(vget_low_u32(pixels), vget_high_u32(pixels));
+                            if ((vget_lane_u32(alpha_bits, 0) & vget_lane_u32(alpha_bits, 1) & AMASK) == AMASK) {
+                                vst1q_u32(dst_buffer, pixels);
+                                remain -= 4; src_buffer += 4; dst_buffer += 4; alphap += 16;
+                                continue;
+                            }
+                        }
+#endif
                         *dst_buffer = *src_buffer;
                         --remain; ++src_buffer; ++dst_buffer; alphap += 4;
                     }

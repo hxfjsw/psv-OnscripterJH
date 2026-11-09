@@ -24,6 +24,8 @@
 
 #include "SarReader.h"
 #include "Utils.h"
+#include <algorithm>
+#include <new>
 #define WRITE_LENGTH 4096
 
 #if defined(PSP)
@@ -161,6 +163,18 @@ void SarReader::readArchive( ArchiveInfo *ai, int archive_type, unsigned int off
             }
         }
     }
+    // Keep the file table in archive order for tools that rewrite archives.
+    // The separate index preserves the first match when names are duplicated.
+    delete[] ai->file_index;
+    ai->file_index = ai->num_of_files ? new(std::nothrow) unsigned int[ai->num_of_files] : NULL;
+    if (ai->file_index){
+        for (i = 0; i < ai->num_of_files; i++) ai->file_index[i] = i;
+        std::sort(ai->file_index, ai->file_index + ai->num_of_files,
+                  [ai](unsigned int left, unsigned int right){
+                      int order = strcmp(ai->fi_list[left].name, ai->fi_list[right].name);
+                      return order == 0 ? left < right : order < 0;
+                  });
+    }
 }
 
 int SarReader::writeHeaderSub( ArchiveInfo *ai, FILE *fp, int archive_type, int nsa_offset )
@@ -274,7 +288,7 @@ int SarReader::getNumFiles(){
     return num;
 }
 
-int SarReader::getIndexFromFile( ArchiveInfo *ai, const char *file_name )
+unsigned int SarReader::getIndexFromFile( ArchiveInfo *ai, const char *file_name )
 {
     unsigned int i, len;
 
@@ -287,6 +301,18 @@ int SarReader::getIndexFromFile( ArchiveInfo *ai, const char *file_name )
         if ( 'a' <= capital_name[i] && capital_name[i] <= 'z' ) capital_name[i] += 'A' - 'a';
         else if ( capital_name[i] == '/' ) capital_name[i] = '\\';
     }
+    if (ai->file_index){
+        const unsigned int *begin = ai->file_index;
+        const unsigned int *end = begin + ai->num_of_files;
+        const unsigned int *found = std::lower_bound(
+            begin, end, capital_name,
+            [ai](unsigned int index, const char *name){
+                return strcmp(ai->fi_list[index].name, name) < 0;
+            });
+        if (found != end && !strcmp(capital_name, ai->fi_list[*found].name)) return *found;
+        return ai->num_of_files;
+    }
+
     for ( i=0 ; i<ai->num_of_files ; i++ ){
         if ( !strcmp( capital_name, ai->fi_list[i].name ) ) break;
     }
@@ -357,7 +383,7 @@ size_t SarReader::getFileSub( ArchiveInfo *ai, const char *file_name, unsigned c
 size_t SarReader::getFile( const char *file_name, unsigned char *buf, int *location )
 {
     size_t ret;
-    if ( ( ret = DirectReader::getFile( file_name, buf, location ) ) ) return ret;
+    if (readLooseFile(file_name, buf, location, ret)) return ret;
 
     ArchiveInfo *info = archive_info.next;
     size_t j = 0;

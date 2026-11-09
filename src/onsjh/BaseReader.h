@@ -83,6 +83,7 @@ struct BaseReader
         int power_resume_number; // currently only for PSP
         char *file_name;
         FileInfo *fi_list;
+        unsigned int *file_index;
         unsigned int num_of_files;
         unsigned long base_offset;
 
@@ -92,12 +93,14 @@ struct BaseReader
             power_resume_number = 0;
             file_name = NULL;
             fi_list = NULL;
+            file_index = NULL;
             num_of_files = 0;
         }
         ~ArchiveInfo(){
             if (file_handle) fclose( file_handle );
             if (file_name)   delete[] file_name;
             if (fi_list)     delete[] fi_list;
+            delete[] file_index;
         }
     };
 

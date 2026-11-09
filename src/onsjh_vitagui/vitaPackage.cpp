@@ -212,8 +212,9 @@ int VitaPackage::SetSFOString(std::string title, std::string title_id) {
 	setSfoString(sfo_buffer, "TITLE", title.c_str());
 	setSfoString(sfo_buffer, "STITLE", title.c_str());
 	setSfoString(sfo_buffer, "TITLE_ID", title_id.c_str());
-	WriteFile((VitaPackage::Package_path + "sce_sys/param.sfo").c_str(), sfo_buffer, SFO_SIZE);
-
+	const int written = WriteFile((VitaPackage::Package_path + "sce_sys/param.sfo").c_str(), sfo_buffer, SFO_SIZE);
+	free(sfo_buffer);
+	return written;
 }
 #define ntohl __builtin_bswap32
 VitaPackage::VitaPackage(const std::string path) :

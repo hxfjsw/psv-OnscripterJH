@@ -13,7 +13,7 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 message("in project " ${PROJECT_NAME})
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -O3 -Wno-unused-variable -Wno-unused-but-set-variable -Wno-format-truncation -fno-lto")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -MMD -MT -MF -std=c++11 -fno-rtti -fno-exceptions -fno-optimize-sibling-calls")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -fno-rtti -fno-exceptions -fno-optimize-sibling-calls")
 set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d PARENTAL_LEVEL=1")
 set(VITA_MAKE_FSELF_FLAGS "${VITA_MAKE_FSELF_FLAGS} -a 0x2808000000000001")
 
@@ -80,12 +80,15 @@ target_link_libraries(${PROJECT_NAME}
   vita2d_ext
   ScePgf_stub
   SceHid_stub
+  freetype
   bz2
   m
   c
   png
   jpeg
+  webpdemux
   webp
+  sharpyuv
   z
   SceNetCtl_stub 
   SceNet_stub
@@ -96,9 +99,12 @@ target_link_libraries(${PROJECT_NAME}
   mpg123
   vorbisfile
   vorbis
-  ogg
   mikmod
   modplug
+  xmp-lite
+  opusfile
+  opus
+  ogg
   SceAudioIn_stub
   SceAudio_stub
   SceAppUtil_stub
@@ -106,7 +112,6 @@ target_link_libraries(${PROJECT_NAME}
   SceAppMgr_stub 
 
   luajit-5.1
-  freetype
   SceCommonDialog_stub
   SceCtrl_stub
   SceDisplay_stub

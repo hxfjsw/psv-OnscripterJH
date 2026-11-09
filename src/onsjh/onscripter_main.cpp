@@ -83,41 +83,6 @@ void optionVersion()
     exit(0);
 }
 
-#if defined(PSV)
-int VITA_SuspendCallback(int notifyId, int notifyCount, int powerInfo, void *common)
-{
-	if ((powerInfo >> 4) & SCE_POWER_CB_RESUMING) // FIXME: work but... meh ?
-	{
-
-	}
-	return 0;
-}
-
-int VITA_RegisterCallbackThread(SceSize args, void *argp)
-{
-	SceUID cbid;
-	cbid = sceKernelCreateCallback("Suspend Callback", 0, VITA_SuspendCallback, NULL);
-	scePowerRegisterCallback(cbid);
-	while (1) // FIXME: to recode
-	{
-		sceKernelDelayThreadCB(0);
-	}
-	return 0;
-}
-
-int VITA_SetupCallbacks(void)
-{
-	SceUID thid;
-	thid = sceKernelCreateThread("update_thread", VITA_RegisterCallbackThread, 0x10000100, 0x10000, 0, 0, NULL);
-	if (thid >= 0)
-	{
-		sceKernelStartThread(thid, 0, 0);
-	}
-	return thid;
-}
-
-#endif
-
 #if defined(IOS)
 extern "C" void playVideoIOS(const char *filename, bool click_flag, bool loop_flag)
 {
@@ -251,7 +216,6 @@ extern "C"
         ons.setCompatibilityMode();
         ons.disableRescale();
         ons.enableButtonShortCut();
-        VITA_SetupCallbacks();
     #elif defined(WINRT)
         {
             ScriptSelector ss;

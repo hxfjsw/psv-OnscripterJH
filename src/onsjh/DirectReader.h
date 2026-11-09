@@ -106,6 +106,7 @@ protected:
     size_t decodeLZSS( struct ArchiveInfo *ai, int no, unsigned char *buf );
     int getRegisteredCompressionType( const char *file_name );
     size_t getDecompressedFileLength( int type, FILE *fp, size_t offset );
+    bool readLooseFile(const char *file_name, unsigned char *buffer, int *location, size_t &bytes_read);
     
 private:
     FILE *getFileHandle( const char *file_name, int &compression_type, size_t *length );
